@@ -1,0 +1,48 @@
+// This is your Prisma schema file
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model Siswa {
+  id             String     @id @default(uuid())
+  nis            String     @unique
+  nama           String
+  // faceEmbedding akan menyimpan array angka dari MediaPipe dalam bentuk JSON/String
+  faceEmbedding  Json?      
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  absensi        Absensi[]
+}
+
+model Absensi {
+  id         String   @id @default(uuid())
+  waktu      DateTime @default(now())
+  latitude   Float
+  longitude  Float
+  status     Status   @default(HADIR)
+  
+  // Relasi ke Siswa
+  siswaId    String
+  siswa      Siswa    @relation(fields: [siswaId], references: [id])
+}
+
+model LokasiSekolah {
+  id               Int      @id @default(autoincrement())
+  nama             String   @default("Gerbang Utama")
+  latitudeSekolah  Float
+  longitudeSekolah Float
+  radiusMeter      Int      @default(50) // Radius maksimal absen dalam meter
+}
+
+enum Status {
+  HADIR
+  TELAT
+  IZIN
+  SAKIT
+}
