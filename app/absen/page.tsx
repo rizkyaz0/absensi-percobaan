@@ -1,7 +1,9 @@
 "use client";
 import React, { useRef, useState, useEffect, useCallback } from "react";
 import Webcam from "react-webcam";
-import * as faceapi from "@vladmandic/face-api";
+
+// Lazy load API di Client-side untuk menghindari Next.js SSR Build Error (TextEncoder)
+let faceapi: any = null;
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -54,6 +56,11 @@ export default function AbsenPage() {
     useEffect(() => {
         async function loadModels() {
             try {
+                // Import dinamis di sisi klien
+                if (!faceapi) {
+                    faceapi = await import("@vladmandic/face-api");
+                }
+                
                 const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
                 await Promise.all([
                     faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
@@ -69,7 +76,7 @@ export default function AbsenPage() {
     }, []);
 
     const handleAbsen = useCallback(async () => {
-        if (!modelsLoaded || !webcamRef.current || !webcamRef.current.video) return;
+        if (!modelsLoaded || !faceapi || !webcamRef.current || !webcamRef.current.video) return;
         if (!lokasi) {
             toast.error("GPS tidak tersedia", { description: lokasiError || "Aktifkan GPS terlebih dahulu." });
             return;
@@ -100,7 +107,7 @@ export default function AbsenPage() {
                 return;
             }
 
-            const faceDescriptorArray = Array.from(result.descriptor);
+            const faceDescriptorArray = Array.from(result.descriptor) as number[];
 
             // Validasi ukuran wajah (Opsional, agar jangan terlalu jauh)
             const box = result.detection.box;

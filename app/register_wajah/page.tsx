@@ -1,7 +1,9 @@
 "use client";
 import React, { useRef, useState, useEffect } from "react";
 import Webcam from "react-webcam";
-import * as faceapi from "@vladmandic/face-api";
+
+// Lazy load API di Client-side untuk menghindari Next.js SSR Build Error (TextEncoder)
+let faceapi: any = null;
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,6 +25,11 @@ export default function RegisterWajah() {
     useEffect(() => {
         async function loadModels() {
             try {
+                // Import dinamis di sisi klien
+                if (!faceapi) {
+                    faceapi = await import("@vladmandic/face-api");
+                }
+
                 // CDN Resmi dari fork terupdate vladmandic
                 const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
                 await Promise.all([
@@ -40,7 +47,7 @@ export default function RegisterWajah() {
     }, []);
 
     const captureFrame = async () => {
-        if (!modelsLoaded || !webcamRef.current || !webcamRef.current.video) return;
+        if (!modelsLoaded || !faceapi || !webcamRef.current || !webcamRef.current.video) return;
         if (!nama || !nis) {
             toast.warning("Nama dan NIS wajib diisi di awal");
             return;
@@ -58,7 +65,7 @@ export default function RegisterWajah() {
 
             if (result) {
                 // Konversi Float32Array ke Array native agar bisa dikirim sebagai JSON
-                const faceDescriptor = Array.from(result.descriptor);
+                const faceDescriptor = Array.from(result.descriptor) as number[];
                 
                 const newEmbeddings = [...embeddings, faceDescriptor];
                 setEmbeddings(newEmbeddings);
