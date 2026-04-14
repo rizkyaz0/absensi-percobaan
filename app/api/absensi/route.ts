@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { getFaceDescriptor, compareFaceDescriptors } from "@/lib/faceDescriptor";
+import { compareEuclideanDistance } from "@/lib/faceDescriptor";
 
 /** Haversine Formula: Hitung jarak (meter) antara 2 koordinat GPS */
 function hitungJarak(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -54,10 +54,10 @@ export async function POST(request: Request) {
             }
         }
 
-        // 2. Normalisasi input webcam (1 Frame scan dari UI Absensi)
-        const descBaru = getFaceDescriptor(faceEmbedding);
-        if (descBaru.length === 0) {
-            return NextResponse.json({ success: false, message: "Geometri gagal diekstrak." }, { status: 400 });
+        // 2. Validasi input array face-api 128D (langsung dari sisi Client)
+        const descBaru = faceEmbedding;
+        if (descBaru.length !== 128) {
+            return NextResponse.json({ success: false, message: "Kesalahan Array Biometrik. Pastikan kamera Face-API mendeteksi wajah dengan jelas." }, { status: 400 });
         }
 
         // 3. Cocokkan dengan Master Multi-Sample Array di database
@@ -66,24 +66,25 @@ export async function POST(request: Request) {
         });
 
         let siswaCocok: { id: string; nama: string; nis: string } | null = null;
-        let skorTertinggi = 0;
+        let jarakTerbaik = 999; // Semakin kecil semakin identik
 
         for (const siswaDb of allSiswa) {
             if (siswaDb.faceEmbedding && Array.isArray(siswaDb.faceEmbedding)) {
                 let dbEmbeds = siswaDb.faceEmbedding as any[];
-                let maxSimilarity = 0;
+                let minDistanceLokal = 999;
 
-                if (dbEmbeds.length > 0 && Array.isArray(dbEmbeds[0])) {
+                if (dbEmbeds.length > 0) {
+                    // dbEmbeds seharusnya berisi 3 vektor 128D
                     for (const dbDesc of dbEmbeds) {
-                        const skor = compareFaceDescriptors(dbDesc, descBaru);
-                        if (skor > maxSimilarity) maxSimilarity = skor;
+                        const jarak = compareEuclideanDistance(dbDesc, descBaru);
+                        if (jarak < minDistanceLokal) minDistanceLokal = jarak;
                     }
                 }
 
-                if (maxSimilarity > skorTertinggi) {
-                    skorTertinggi = maxSimilarity;
-                    // Skor threshold Cosine Similarity => 0.94
-                    if (maxSimilarity >= 0.94) {
+                if (minDistanceLokal < jarakTerbaik) {
+                    jarakTerbaik = minDistanceLokal;
+                    // Skor threshold Euclidean FaceNet mutlak <= 0.45
+                    if (minDistanceLokal <= 0.45) {
                         siswaCocok = { id: siswaDb.id, nama: siswaDb.nama, nis: siswaDb.nis };
                     }
                 }
@@ -93,8 +94,8 @@ export async function POST(request: Request) {
         if (!siswaCocok) {
             return NextResponse.json({
                 success: false,
-                message: `Wajah tidak dikenali. Pastikan Anda sudah mendaftar sistem 3D.`,
-                skor: skorTertinggi
+                message: `Identitas tak direkognisi. Jarak wajah terdekat (Euclidean): ${jarakTerbaik.toFixed(3)} (>0.45).`,
+                skor: jarakTerbaik // Menggunakan jarak untuk display
             }, { status: 404 });
         }
 
@@ -141,7 +142,7 @@ export async function POST(request: Request) {
                 nis: siswaCocok.nis,
                 status: status,
                 waktu: absenBaru.waktu,
-                skor: (skorTertinggi * 100).toFixed(1)
+                skor: `Distance: ${jarakTerbaik.toFixed(3)}`
             }
         });
 

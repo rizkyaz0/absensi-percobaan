@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { getFaceDescriptor, compareFaceDescriptors } from "@/lib/faceDescriptor";
+import { compareEuclideanDistance } from "@/lib/faceDescriptor";
 
 export async function POST(request: Request) {
     try {
@@ -15,20 +15,16 @@ export async function POST(request: Request) {
             );
         }
 
-        // Ekstrak dan Normalisasi 3 descriptor wajah
-        const descDepan = getFaceDescriptor(faceEmbeddings[0]);
-        const descKiri = getFaceDescriptor(faceEmbeddings[1]);
-        const descKanan = getFaceDescriptor(faceEmbeddings[2]);
-
-        if (!descDepan.length || !descKiri.length || !descKanan.length) {
+        // 2. Validasi panjang 128D FaceNet (memastikan dikirim dari client valid)
+        if (faceEmbeddings[0].length !== 128 || faceEmbeddings[1].length !== 128 || faceEmbeddings[2].length !== 128) {
             return NextResponse.json(
-                { success: false, message: "Kalkulasi geometri gagal. Pastikan wajah terlihat jelas tanpa halangan tebal." },
+                { success: false, message: "Kalkulasi geometri gagal. Pastikan wajah terlihat penuh ke arah kamera." },
                 { status: 400 }
             );
         }
 
         // Gabungkan ke master JSON Array
-        const combinedDesc = [descDepan, descKiri, descKanan];
+        const combinedDesc = faceEmbeddings; // array dari tiga Float32Arrays 128D
 
         // 1. Cek apakah NIS sudah terdaftar
         const existingSiswa = await prisma.siswa.findUnique({
@@ -50,25 +46,24 @@ export async function POST(request: Request) {
         for (const siswaDb of allSiswa) {
             if (siswaDb.faceEmbedding && Array.isArray(siswaDb.faceEmbedding)) {
                 let dbEmbeds = siswaDb.faceEmbedding as any[];
-                let maxSimilarity = 0;
+                let minDistance = 999;
 
-                // Memastikan data di DB adalah Array of Descriptors (untuk kompatibilitas ke belakang)
-                if (dbEmbeds.length > 0 && Array.isArray(dbEmbeds[0])) {
-                    // Cek silang setiap sudut wajah di DB dengan 3 sudut wajah pendaftar
+                // Memastikan data di DB adalah Array of Descriptors
+                if (dbEmbeds.length > 0) {
                     for (const dbDesc of dbEmbeds) {
                         for (const newDesc of combinedDesc) {
-                            const skor = compareFaceDescriptors(dbDesc, newDesc);
-                            if (skor > maxSimilarity) maxSimilarity = skor;
+                            const jarak = compareEuclideanDistance(dbDesc, newDesc);
+                            if (jarak < minDistance) minDistance = jarak;
                         }
                     }
                 }
 
-                // Threshold Cosine Similarity ketat: >= 0.94 (Karena titik sudah dibobot dan kebal fluktuasi)
-                if (maxSimilarity >= 0.94) {
+                // Threshold FaceNet yang baku adalah <= 0.45 untuk orang yang sama
+                if (minDistance <= 0.45) {
                     return NextResponse.json(
                         { 
                             success: false, 
-                            message: `Wajah ini terdeteksi sebagai ${siswaDb.nama} (NIS: ${siswaDb.nis}) dengan skor Biometrik ${(maxSimilarity * 100).toFixed(1)}%!` 
+                            message: `Wajah ini terdeteksi sebagai ${siswaDb.nama} (NIS: ${siswaDb.nis}) dengan skor Jarak Biometrik ${minDistance.toFixed(3)}!` 
                         },
                         { status: 400 }
                     );

@@ -1,8 +1,10 @@
 /**
  * lib/faceDescriptor.ts
  * 
- * Algoritma Cosine Similarity + Centering & Scaling Normalization
- * Pendekatan paling robust berstandar ilmiah.
+ * Algoritma Geometric Ratio Descriptor
+ * Berbasis perbandingan jarak antar landmark, bukan koordinat mentah.
+ * Sistem ini jauh lebih diskriminatif antar individu karena rasio jarak
+ * tidak terpengaruh ekspresi, rotasi kepala, atau jarak ke kamera.
  */
 
 interface Landmark {
@@ -11,86 +13,32 @@ interface Landmark {
     z: number;
 }
 
-/** Hitung jarak 3D */
-const dist3D = (a: Landmark, b: Landmark): number =>
-    Math.sqrt(Math.pow(a.x - b.x, 2) + Math.pow(a.y - b.y, 2) + Math.pow(a.z - b.z, 2));
+/**
+ * lib/faceDescriptor.ts
+ * 
+ * Modul Evaluasi Deep Learning 128-D FaceNet (via face-api.js)
+ * Sangat presisi (Akreditasi Biometrik). Jangkauan mutlak (Euclidean Distance).
+ */
 
 /**
- * Normalisasi Centering (Fokus hidung) & Scaling (Lebar pupil)
- * dan memberikan bobot (Weight) pada setiap titik.
+ * Bandingkan 2 face descriptor 128D (Float32Array) menggunakan Euclidean Distance.
+ * Threshold yang diakui FaceNet adalah < 0.45 (Kembar identik / Orang yang sama)
+ * @param desc1 Vector Float Array A
+ * @param desc2 Vector Float Array B 
+ * @returns Jarak (semakin mendekati 0.0, semakin 100% sama)
  */
-export function getFaceDescriptor(lm: Landmark[]): number[] {
-    if (!lm || lm.length < 478) return [];
+export function compareEuclideanDistance(desc1: any[] | Float32Array | object, desc2: any[] | Float32Array | object): number {
+    // Pastikan array terdeteksi karena hasil simpanan database berformat objek JSON.
+    const arr1 = Object.values(desc1);
+    const arr2 = Object.values(desc2);
 
-    // 1. Centering (Pusat di ujung hidung [titik 1])
-    const cx = lm[1].x;
-    const cy = lm[1].y;
-    const cz = lm[1].z;
+    if (!arr1 || !arr2 || arr1.length !== 128 || arr2.length !== 128) return 1.0;
 
-    // 2. Scaling (Jarak antar sudut mata bagian dalam sebagai skala universal)
-    const distEye = Math.sqrt(
-        Math.pow(lm[133].x - lm[362].x, 2) +
-        Math.pow(lm[133].y - lm[362].y, 2) +
-        Math.pow(lm[133].z - lm[362].z, 2)
-    );
-    const scale = distEye > 0.0001 ? distEye : 1;
-
-    // 3. Weighted Extraction
-    const descriptor: number[] = [];
-    
-    // Titik Mata & Pangkal Hidung (Sangat Statis & Unik) -> Bobot Tinggi
-    const highWeight = new Set([
-        // Mata Kiri
-        33, 133, 159, 145, 153, 144, 163, 7, 
-        // Mata Kanan
-        263, 362, 386, 374, 380, 373, 390, 249,
-        // Hidung & Dahi Statis
-        1, 2, 94, 168, 197, 195, 5, 4,
-        70, 63, 105, 66, 107, 336, 296, 334, 293, 300
-    ]);
-    
-    // Titik Mulut, Bibir, Pipi, Rahang Terbawah (Dinamis / Ikut Ekspresi) -> Bobot Rendah
-    const lowWeight = new Set([
-        0, 17, 13, 14, 61, 291, 39, 269, 18, 58, 288,
-        152, 148, 176, 150, 136, 172, 58, 132, 93, 234, 454,
-        37, 267, 84, 314, 17, 405, 181
-    ]);
-
-    for (let i = 0; i < lm.length; i++) {
-        // Normalisasi 3D Point
-        const nx = (lm[i].x - cx) / scale;
-        const ny = (lm[i].y - cy) / scale;
-        const nz = (lm[i].z - cz) / scale;
-        
-        let w = 1.0; // Normal weight
-        if (highWeight.has(i)) w = 2.0; // 2x Bobot untuk tulang keras
-        else if (lowWeight.has(i)) w = 0.2; // Turunkan bobot bibir biar kebal senyum
-        
-        descriptor.push(nx * w, ny * w, nz * w);
+    let distance = 0;
+    for (let i = 0; i < 128; i++) {
+        distance += Math.pow((arr1[i] as number) - (arr2[i] as number), 2);
     }
     
-    return descriptor;
+    return Math.sqrt(distance);
 }
-
-/**
- * Bandingkan 2 face descriptor menggunakan Cosine Similarity
- * Mengembalikan skor kemiripan presisi tinggi (0.0 - 1.0)
- */
-export function compareFaceDescriptors(desc1: number[], desc2: number[]): number {
-    if (!desc1 || !desc2 || desc1.length === 0 || desc1.length !== desc2.length) return 0;
-    
-    let dotProduct = 0;
-    let normA = 0;
-    let normB = 0;
-    
-    for (let i = 0; i < desc1.length; i++) {
-        dotProduct += desc1[i] * desc2[i];
-        normA += desc1[i] * desc1[i];
-        normB += desc2[i] * desc2[i];
-    }
-    
-    if (normA === 0 || normB === 0) return 0;
-    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-}
-
 

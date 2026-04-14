@@ -1,104 +1,88 @@
 "use client";
 import React, { useRef, useState, useEffect } from "react";
 import Webcam from "react-webcam";
-import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
+import * as faceapi from "@vladmandic/face-api";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
-import { UserPlus, Scan, Camera, ArrowLeftCircle, ArrowRightCircle, CheckCircle2 } from "lucide-react";
+import { Scan, Camera, ArrowLeftCircle, ArrowRightCircle, CheckCircle2 } from "lucide-react";
 
 type RegStep = "depan" | "kiri" | "kanan" | "submitting" | "success";
 
 export default function RegisterWajah() {
     const webcamRef = useRef<Webcam>(null);
-    const [faceLandmarker, setFaceLandmarker] = useState<FaceLandmarker | null>(null);
+    const [modelsLoaded, setModelsLoaded] = useState(false);
     const [nama, setNama] = useState("");
     const [nis, setNis] = useState("");
     
     // Core State
     const [step, setStep] = useState<RegStep>("depan");
-    const [embeddings, setEmbeddings] = useState<any[]>([]);
+    const [embeddings, setEmbeddings] = useState<number[][]>([]);
 
     useEffect(() => {
-        async function loadModel() {
+        async function loadModels() {
             try {
-                const vision = await FilesetResolver.forVisionTasks(
-                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
-                );
-                const landmarkers = await FaceLandmarker.createFromOptions(vision, {
-                    baseOptions: {
-                        modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`,
-                        delegate: "GPU",
-                    },
-                    outputFaceBlendshapes: true,
-                    runningMode: "IMAGE",
-                });
-                setFaceLandmarker(landmarkers);
+                // CDN Resmi dari fork terupdate vladmandic
+                const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
+                await Promise.all([
+                    faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
+                    faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+                    faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+                ]);
+                setModelsLoaded(true);
             } catch (error) {
                 console.error("Gagal memuat model:", error);
-                toast.error("Gagal memuat AI Pengenalan Wajah");
+                toast.error("Gagal terhubung ke Data Server AI");
             }
         }
-        loadModel();
+        loadModels();
     }, []);
 
     const captureFrame = async () => {
-        if (!faceLandmarker || !webcamRef.current) return;
+        if (!modelsLoaded || !webcamRef.current || !webcamRef.current.video) return;
         if (!nama || !nis) {
             toast.warning("Nama dan NIS wajib diisi di awal");
             return;
         }
 
-        const imageSrc = webcamRef.current.getScreenshot();
-        if (!imageSrc) return;
+        const videoEl = webcamRef.current.video;
+        if (videoEl.readyState !== 4) return;
 
-        const img = new Image();
-        img.src = imageSrc;
-        
-        await new Promise((resolve) => {
-            img.onload = () => {
-                const originalConsoleError = console.error;
-                console.error = (msg: any, ...args: any[]) => {
-                    if (typeof msg === 'string' && msg.includes('TensorFlow Lite XNNPACK delegate')) return;
-                    originalConsoleError(msg, ...args);
-                };
+        try {
+            // Ekstrak 128D Vektor Identitas Langsung dari Video Frame
+            const result = await faceapi
+                .detectSingleFace(videoEl, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
+                .withFaceLandmarks()
+                .withFaceDescriptor();
+
+            if (result) {
+                // Konversi Float32Array ke Array native agar bisa dikirim sebagai JSON
+                const faceDescriptor = Array.from(result.descriptor);
                 
-                let result;
-                try {
-                    result = faceLandmarker.detect(img);
-                } catch (e) {
-                    // abaikan warning internal mediapipe
-                } finally {
-                    console.error = originalConsoleError;
+                const newEmbeddings = [...embeddings, faceDescriptor];
+                setEmbeddings(newEmbeddings);
+                
+                if (step === "depan") {
+                    toast.success("Foto Depan Tertangkap!");
+                    setStep("kiri");
+                } else if (step === "kiri") {
+                    toast.success("Foto Kiri Tertangkap!");
+                    setStep("kanan");
+                } else if (step === "kanan") {
+                    toast.success("Mengkalkulasi Biometrik FaceNet...");
+                    setStep("submitting");
+                    submitData(newEmbeddings);
                 }
-
-                if (result && result.faceLandmarks.length > 0) {
-                    const faceData = result.faceLandmarks[0]; // Raw 478 points
-                    
-                    const newEmbeddings = [...embeddings, faceData];
-                    setEmbeddings(newEmbeddings);
-                    
-                    if (step === "depan") {
-                        toast.success("Foto Depan Tertangkap!");
-                        setStep("kiri");
-                    } else if (step === "kiri") {
-                        toast.success("Foto Kiri Tertangkap!");
-                        setStep("kanan");
-                    } else if (step === "kanan") {
-                        toast.success("Mengkalkulasi Biometrik...");
-                        setStep("submitting");
-                        submitData(newEmbeddings);
-                    }
-                } else {
-                    toast.error("Wajah tidak terdeteksi. Posisikan wajah dengan benar di kamera.");
-                }
-                resolve(null);
-            };
-        });
+            } else {
+                toast.error("Wajah tidak terdeteksi. Posisikan kembali dengan pencahayaan terang.");
+            }
+        } catch (e: any) {
+            toast.error(`Kamera Error: ${e.message}`);
+        }
     };
 
-    const submitData = async (finalEmbeddings: any[]) => {
+    const submitData = async (finalEmbeddings: number[][]) => {
         try {
             const response = await fetch("/api/register", {
                 method: "POST",
@@ -106,13 +90,13 @@ export default function RegisterWajah() {
                 body: JSON.stringify({
                     nama: nama,
                     nis: nis,
-                    faceEmbeddings: finalEmbeddings, // Mengirim 3 foto mentah
+                    faceEmbeddings: finalEmbeddings,
                 }),
             });
 
             const hasil = await response.json();
             if (hasil.success) {
-                toast.success("Registrasi Sukses!", { description: `Data 3 Sudut Wajah untuk ${nama} berhasil disimpan.` });
+                toast.success("Registrasi Sukses!", { description: `Data 3 Sudut Wajah untuk ${nama} berhasil disimpan ke Biometrik Cloud.` });
                 setStep("success");
                 setNama("");
                 setNis("");
@@ -191,10 +175,10 @@ export default function RegisterWajah() {
                             videoConstraints={{ facingMode: "user" }}
                         />
                         
-                        {!faceLandmarker && (
+                        {!modelsLoaded && (
                             <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/90 text-white gap-2 z-10">
                                 <Scan className="animate-spin w-8 h-8 text-blue-400" />
-                                <span className="text-sm font-medium animate-pulse">Menyiapkan Engine Liveness...</span>
+                                <span className="text-sm font-medium animate-pulse">Memuat Neural Network (2MB)...</span>
                             </div>
                         )}
 
@@ -206,7 +190,7 @@ export default function RegisterWajah() {
                     <Button
                         className={`w-full h-14 text-base font-semibold shadow-lg transition-all duration-300 ${ui.color}`}
                         onClick={captureFrame}
-                        disabled={step === "submitting" || step === "success" || !faceLandmarker}
+                        disabled={step === "submitting" || step === "success" || !modelsLoaded}
                     >
                         <span className="flex items-center gap-2">
                             {ui.icon} {ui.label}

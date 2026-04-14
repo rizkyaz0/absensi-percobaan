@@ -1,8 +1,8 @@
 "use client";
 import React, { useRef, useState, useEffect, useCallback } from "react";
 import Webcam from "react-webcam";
-import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import * as faceapi from "@vladmandic/face-api";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
@@ -20,8 +20,7 @@ interface AbsenResult {
 
 export default function AbsenPage() {
     const webcamRef = useRef<Webcam>(null);
-    const [faceLandmarker, setFaceLandmarker] = useState<FaceLandmarker | null>(null);
-    const [modelReady, setModelReady] = useState(false);
+    const [modelsLoaded, setModelsLoaded] = useState(false);
     const [absenStatus, setAbsenStatus] = useState<AbsenStatus>("idle");
     const [hasilAbsen, setHasilAbsen] = useState<AbsenResult | null>(null);
     const [lokasi, setLokasi] = useState<{ lat: number; lon: number } | null>(null);
@@ -51,32 +50,26 @@ export default function AbsenPage() {
         );
     }, []);
 
-    // Load MediaPipe Model
+    // Load Neural Network Data Model
     useEffect(() => {
-        async function loadModel() {
+        async function loadModels() {
             try {
-                const vision = await FilesetResolver.forVisionTasks(
-                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
-                );
-                const landmarker = await FaceLandmarker.createFromOptions(vision, {
-                    baseOptions: {
-                        modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`,
-                        delegate: "GPU",
-                    },
-                    outputFaceBlendshapes: true,
-                    runningMode: "IMAGE",
-                });
-                setFaceLandmarker(landmarker);
-                setModelReady(true);
+                const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
+                await Promise.all([
+                    faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
+                    faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+                    faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+                ]);
+                setModelsLoaded(true);
             } catch (error) {
-                toast.error("Gagal memuat AI", { description: "Model pengenalan wajah gagal dimuat." });
+                toast.error("Gagal memuat AI", { description: "Model pengenalan wajah gagal dimuat dari server Cloud." });
             }
         }
-        loadModel();
+        loadModels();
     }, []);
 
     const handleAbsen = useCallback(async () => {
-        if (!faceLandmarker || !webcamRef.current) return;
+        if (!modelsLoaded || !webcamRef.current || !webcamRef.current.video) return;
         if (!lokasi) {
             toast.error("GPS tidak tersedia", { description: lokasiError || "Aktifkan GPS terlebih dahulu." });
             return;
@@ -85,99 +78,70 @@ export default function AbsenPage() {
         setAbsenStatus("scanning");
         setHasilAbsen(null);
 
-        const imageSrc = webcamRef.current.getScreenshot();
-        if (!imageSrc) {
-            toast.error("Kamera tidak aktif");
+        const videoEl = webcamRef.current.video;
+        if (videoEl.readyState !== 4) {
+            toast.error("Kamera belum siap");
             setAbsenStatus("idle");
             return;
         }
 
-        const img = new Image();
-        img.src = imageSrc;
-        img.onload = async () => {
-            // Intercept console.error MediaPipe WASM
-            const originalConsoleError = console.error;
-            console.error = (msg: any, ...args: any[]) => {
-                if (typeof msg === "string" && msg.includes("TensorFlow Lite XNNPACK delegate")) return;
-                originalConsoleError(msg, ...args);
-            };
+        try {
+            const result = await faceapi
+                .detectSingleFace(videoEl, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
+                .withFaceLandmarks()
+                .withFaceDescriptor();
 
-            let result;
-            try {
-                result = faceLandmarker.detect(img);
-            } finally {
-                console.error = originalConsoleError;
-            }
-
-            if (!result || result.faceLandmarks.length === 0) {
+            if (!result) {
                 toast.error("Wajah tidak terdeteksi", {
-                    description: "Pastikan wajah terlihat jelas, pencahayaan cukup, dan tidak tertutup apapun."
+                    description: "Pastikan menghadap layar dengan jelas, pencahayaan cukup."
                 });
                 setAbsenStatus("error");
                 setTimeout(() => setAbsenStatus("idle"), 2000);
                 return;
             }
 
-            const faceData = result.faceLandmarks[0];
+            const faceDescriptorArray = Array.from(result.descriptor);
 
-            // Validasi geometris: ukuran & posisi wajah
-            let minX = 1, maxX = 0, minY = 1, maxY = 0;
-            for (const pt of faceData) {
-                if (pt.x < minX) minX = pt.x;
-                if (pt.x > maxX) maxX = pt.x;
-                if (pt.y < minY) minY = pt.y;
-                if (pt.y > maxY) maxY = pt.y;
-            }
-            const faceWidth = maxX - minX;
-            const faceHeight = maxY - minY;
-            const centerX = minX + faceWidth / 2;
-            const centerY = minY + faceHeight / 2;
-
-            if (faceWidth < 0.20 || faceHeight < 0.25) {
+            // Validasi ukuran wajah (Opsional, agar jangan terlalu jauh)
+            const box = result.detection.box;
+            const videoW = videoEl.videoWidth;
+            if (box.width / videoW < 0.20) {
                 toast.error("Wajah terlalu jauh", { description: "Dekatkan wajah lebih ke kamera." });
-                setAbsenStatus("error");
-                setTimeout(() => setAbsenStatus("idle"), 2000);
-                return;
-            }
-            if (centerX < 0.35 || centerX > 0.65 || centerY < 0.35 || centerY > 0.65) {
-                toast.error("Posisi wajah salah", { description: "Posisikan wajah di tengah bingkai." });
                 setAbsenStatus("error");
                 setTimeout(() => setAbsenStatus("idle"), 2000);
                 return;
             }
 
             // Kirim ke API Absensi
-            try {
-                const response = await fetch("/api/absensi", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        faceEmbedding: faceData,
-                        latitude: lokasi.lat,
-                        longitude: lokasi.lon,
-                    }),
+            const response = await fetch("/api/absensi", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    faceEmbedding: faceDescriptorArray,
+                    latitude: lokasi.lat,
+                    longitude: lokasi.lon,
+                }),
+            });
+
+            const hasil = await response.json();
+
+            if (hasil.success) {
+                setHasilAbsen(hasil.data);
+                setAbsenStatus("success");
+                toast.success(`Hadir! Selamat datang, ${hasil.data.nama}`, {
+                    description: `Status: ${hasil.data.status} — ${new Date(hasil.data.waktu).toLocaleTimeString("id-ID")}`
                 });
-
-                const hasil = await response.json();
-
-                if (hasil.success) {
-                    setHasilAbsen(hasil.data);
-                    setAbsenStatus("success");
-                    toast.success(`Hadir! Selamat datang, ${hasil.data.nama}`, {
-                        description: `Status: ${hasil.data.status} — ${new Date(hasil.data.waktu).toLocaleTimeString("id-ID")}`
-                    });
-                } else {
-                    setAbsenStatus("error");
-                    toast.error("Absensi Ditolak", { description: hasil.message });
-                    setTimeout(() => setAbsenStatus("idle"), 3000);
-                }
-            } catch (err) {
+            } else {
                 setAbsenStatus("error");
-                toast.error("Gagal terhubung ke server");
-                setTimeout(() => setAbsenStatus("idle"), 2000);
+                toast.error("Absensi Ditolak", { description: hasil.message });
+                setTimeout(() => setAbsenStatus("idle"), 3000);
             }
-        };
-    }, [faceLandmarker, lokasi, lokasiError]);
+        } catch (err: any) {
+            setAbsenStatus("error");
+            toast.error("Gagal terhubung ke server / AI Error", { description: err.message });
+            setTimeout(() => setAbsenStatus("idle"), 2000);
+        }
+    }, [modelsLoaded, lokasi, lokasiError]);
 
     const statusConfig = {
         idle: { border: "border-slate-600", pulse: false },
@@ -203,7 +167,7 @@ export default function AbsenPage() {
 
             {/* Kamera Card */}
             <Card className="w-full max-w-lg md:max-w-2xl bg-slate-800/60 border-slate-700 backdrop-blur-sm shadow-2xl rounded-3xl -mt-2">
-                <CardContent className="p-3 md:p-6 space-y-4">
+                <CardContent className="p-3 md:p-6 space-y-4 pt-6">
                     {/* Viewport Kamera */}
                     <div className={`relative aspect-[3/4] md:aspect-video rounded-2xl overflow-hidden bg-black border-2 transition-all duration-300 ${cfg.border} ${cfg.pulse ? "shadow-[0_0_30px_rgba(59,130,246,0.3)] shadow-inner" : ""}`}>
                         <Webcam
@@ -214,10 +178,10 @@ export default function AbsenPage() {
                         />
 
                         {/* Overlay AI loading */}
-                        {!modelReady && (
-                            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/75 text-white gap-2">
+                        {!modelsLoaded && (
+                            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/75 text-white gap-2 z-10">
                                 <Scan className="animate-spin w-8 h-8 text-blue-400" />
-                                <span className="text-sm font-medium animate-pulse">Memuat AI...</span>
+                                <span className="text-sm font-medium animate-pulse">Menghubungkan Database AI...</span>
                             </div>
                         )}
 
@@ -234,16 +198,16 @@ export default function AbsenPage() {
                         {absenStatus === "scanning" && (
                             <div className="absolute bottom-3 left-0 right-0 flex justify-center">
                                 <span className="bg-blue-600/90 text-white text-xs px-3 py-1 rounded-full animate-pulse font-medium">
-                                    Memindai wajah...
+                                    Memindai kecocokan identitas...
                                 </span>
                             </div>
                         )}
 
                         {/* Petunjuk posisi */}
-                        {absenStatus === "idle" && modelReady && (
+                        {absenStatus === "idle" && modelsLoaded && (
                             <div className="absolute bottom-3 left-0 right-0 flex justify-center">
                                 <span className="bg-black/60 text-white/70 text-xs px-3 py-1 rounded-full">
-                                    Posisikan wajah dalam bingkai oval
+                                    Posisikan wajah Anda pada area tengah
                                 </span>
                             </div>
                         )}
@@ -256,7 +220,7 @@ export default function AbsenPage() {
                             <div>
                                 <p className="text-green-300 font-bold text-lg">{hasilAbsen.nama}</p>
                                 <p className="text-green-400/70 text-xs">NIS: {hasilAbsen.nis}</p>
-                                <div className="flex gap-2 mt-1">
+                                <div className="flex flex-wrap gap-2 mt-1">
                                     <Badge variant="outline" className={`text-xs border ${hasilAbsen.status === "HADIR" ? "border-green-500 text-green-300" : "border-yellow-500 text-yellow-300"}`}>
                                         {hasilAbsen.status}
                                     </Badge>
@@ -264,8 +228,8 @@ export default function AbsenPage() {
                                         <Clock className="w-3 h-3 mr-1" />
                                         {new Date(hasilAbsen.waktu).toLocaleTimeString("id-ID")}
                                     </Badge>
-                                    <Badge variant="outline" className="text-xs border-blue-500 text-blue-300">
-                                        {hasilAbsen.skor}% cocok
+                                    <Badge variant="outline" className="text-xs border-blue-500 text-blue-300 font-mono">
+                                        {hasilAbsen.skor}
                                     </Badge>
                                 </div>
                             </div>
@@ -278,7 +242,7 @@ export default function AbsenPage() {
                         <MapPin className="w-4 h-4" />
                         {lokasi
                             ? <span>GPS Aktif: {lokasi.lat.toFixed(5)}, {lokasi.lon.toFixed(5)}</span>
-                            : <span>{lokasiError || "Mengambil lokasi..."}</span>
+                            : <span>{lokasiError || "Mengambil sinyal GPS..."}</span>
                         }
                     </div>
 
@@ -292,14 +256,14 @@ export default function AbsenPage() {
                                 : "bg-blue-600 hover:bg-blue-700 hover:scale-[1.02]"
                         }`}
                         onClick={absenStatus === "idle" || absenStatus === "error" ? handleAbsen : undefined}
-                        disabled={!modelReady || absenStatus === "scanning"}
+                        disabled={!modelsLoaded || absenStatus === "scanning"}
                     >
                         {absenStatus === "scanning" ? (
-                            <span className="flex items-center gap-2"><Scan className="animate-spin w-5 h-5" /> Memindai...</span>
+                            <span className="flex items-center gap-2"><Scan className="animate-spin w-5 h-5" /> Autentikasi...</span>
                         ) : absenStatus === "success" ? (
-                            <span className="flex items-center gap-2"><CheckCircle className="w-5 h-5" /> Absensi Tercatat!</span>
+                            <span className="flex items-center gap-2"><CheckCircle className="w-5 h-5" /> Selesai!</span>
                         ) : (
-                            <span className="flex items-center gap-2"><Camera className="w-5 h-5" /> Absen Sekarang</span>
+                            <span className="flex items-center gap-2"><Camera className="w-5 h-5" /> SCAN WAJAH</span>
                         )}
                     </Button>
                 </CardContent>
@@ -307,7 +271,7 @@ export default function AbsenPage() {
 
             {/* Link ke Dashboard */}
             <a href="/admin" className="text-slate-500 hover:text-slate-300 text-sm transition-colors underline underline-offset-2">
-                Lihat Dashboard Admin →
+                Ke Dashboard Admin →
             </a>
         </div>
     );
