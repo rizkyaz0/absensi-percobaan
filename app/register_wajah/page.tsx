@@ -97,8 +97,8 @@ export default function RegisterWajah() {
     }, []);
 
     // ============================================================
-    // LOOP DETEKSI EAR REAL-TIME (Anti-Spoofing Liveness)
-    // Baca video secara iteratif menggunakan requestAnimationFrame
+    // LOOP DETEKSI EAR — Throttled 200ms (bukan per-frame)
+    // Hanya gunakan .withFaceLandmarks() tanpa descriptor → 3x lebih ringan
     // ============================================================
     const startLivenessLoop = useCallback(() => {
         earWasLow.current = false;
@@ -106,54 +106,46 @@ export default function RegisterWajah() {
         setLivenessReady(false);
         isCapturing.current = false;
 
-        const loop = async () => {
-            if (!faceapi || !webcamRef.current || !webcamRef.current.video) {
-                animFrameRef.current = requestAnimationFrame(loop);
-                return;
-            }
+        // Gunakan setInterval 200ms agar tidak membebani CPU seperti requestAnimationFrame 60fps
+        const intervalId = setInterval(async () => {
+            if (!faceapi || !webcamRef.current?.video) return;
             const videoEl = webcamRef.current.video;
-            if (videoEl.readyState !== 4) {
-                animFrameRef.current = requestAnimationFrame(loop);
-                return;
-            }
+            if (videoEl.readyState !== 4) return;
 
             try {
+                // Pipeline RINGAN: SSD detect + landmark saja (TANPA descriptor mahal)
                 const result = await faceapi
                     .detectSingleFace(videoEl, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
                     .withFaceLandmarks();
 
                 if (result) {
-                    const pts = result.landmarks.positions; // Array dari 68 titik { x, y }
+                    const pts = result.landmarks.positions;
 
                     // Mata kanan: indeks 36-41, Mata kiri: indeks 42-47
                     const rightEye = pts.slice(36, 42);
                     const leftEye  = pts.slice(42, 48);
-
-                    const earRight = computeEAR(rightEye);
-                    const earLeft  = computeEAR(leftEye);
-                    const ear = (earRight + earLeft) / 2;
+                    const ear = (computeEAR(rightEye) + computeEAR(leftEye)) / 2;
 
                     if (ear < EAR_BLINK_THRESHOLD) {
-                        // Mata sedang menutup (kedip)
                         earWasLow.current = true;
                         setEarStatus("kedip");
-                    } else if (earWasLow.current && ear >= EAR_BLINK_THRESHOLD) {
+                    } else if (earWasLow.current) {
                         // Mata sudah terbuka kembali setelah kedip → LIVENESS CONFIRMED
                         setEarStatus("ok");
                         setLivenessReady(true);
-                        cancelAnimationFrame(animFrameRef.current);
-                        return; // Hentikan loop
+                        clearInterval(intervalId);
+                        animFrameRef.current = 0;
                     }
                 }
             } catch (_) {
                 // Abaikan error deteksi per frame
             }
+        }, 200); // Hanya 5x per detik, jauh lebih hemat CPU
 
-            animFrameRef.current = requestAnimationFrame(loop);
-        };
-
-        animFrameRef.current = requestAnimationFrame(loop);
+        // Simpan ID interval di ref agar bisa di-clear saat step berganti
+        animFrameRef.current = intervalId as unknown as number;
     }, []);
+
 
     // Mulai loop saat model siap
     useEffect(() => {
@@ -161,7 +153,7 @@ export default function RegisterWajah() {
             startLivenessLoop();
         }
         return () => {
-            cancelAnimationFrame(animFrameRef.current);
+            if (animFrameRef.current) clearInterval(animFrameRef.current);
         };
     }, [modelsLoaded, step, startLivenessLoop]);
 
