@@ -23,14 +23,17 @@ interface AbsenResult {
 export default function AbsenPage() {
     const webcamRef = useRef<Webcam>(null);
     const [modelsLoaded, setModelsLoaded] = useState(false);
+    const [loadingText, setLoadingText] = useState("Mempersiapkan...");
     const [absenStatus, setAbsenStatus] = useState<AbsenStatus>("idle");
     const [hasilAbsen, setHasilAbsen] = useState<AbsenResult | null>(null);
     const [lokasi, setLokasi] = useState<{ lat: number; lon: number } | null>(null);
     const [lokasiError, setLokasiError] = useState<string>("");
     const [jamSekarang, setJamSekarang] = useState(new Date());
+    const [mounted, setMounted] = useState(false);
 
     // Update jam setiap detik
     useEffect(() => {
+        setMounted(true);
         const timer = setInterval(() => setJamSekarang(new Date()), 1000);
         return () => clearInterval(timer);
     }, []);
@@ -58,15 +61,22 @@ export default function AbsenPage() {
             try {
                 // Import dinamis di sisi klien
                 if (!faceapi) {
+                    setLoadingText("Memuat AI Engine...");
                     faceapi = await import("@vladmandic/face-api");
                 }
                 
                 const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
-                await Promise.all([
-                    faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
-                    faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-                    faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
-                ]);
+                
+                // TinyFaceDetector: 30x lebih ringan, dirancang untuk HP & mobile
+                setLoadingText("Memuat Detektor Wajah...");
+                await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+                
+                setLoadingText("Memuat Landmark Model...");
+                await faceapi.nets.faceLandmark68TinyNet.loadFromUri(MODEL_URL);
+                
+                setLoadingText("Memuat Model Biometrik...");
+                await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+                
                 setModelsLoaded(true);
             } catch (error) {
                 toast.error("Gagal memuat AI", { description: "Model pengenalan wajah gagal dimuat dari server Cloud." });
@@ -93,9 +103,10 @@ export default function AbsenPage() {
         }
 
         try {
+            // TinyFaceDetector: lebih cepat & optimal untuk mobile
             const result = await faceapi
-                .detectSingleFace(videoEl, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
-                .withFaceLandmarks()
+                .detectSingleFace(videoEl, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.4 }))
+                .withFaceLandmarks(true) // true = gunakan tiny 68-point model
                 .withFaceDescriptor();
 
             if (!result) {
@@ -164,11 +175,11 @@ export default function AbsenPage() {
             {/* Header */}
             <div className="text-center">
                 <h1 className="text-3xl font-bold text-white tracking-tight">Presensi Wajah</h1>
-                <p className="text-slate-400 text-sm mt-1">
-                    {jamSekarang.toLocaleDateString("id-ID", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
+                <p className="text-slate-400 text-sm mt-1" suppressHydrationWarning>
+                    {mounted ? jamSekarang.toLocaleDateString("id-ID", { weekday: "long", day: "numeric", month: "long", year: "numeric" }) : ""}
                 </p>
-                <p className="text-4xl font-mono font-bold text-blue-300 mt-1">
-                    {jamSekarang.toLocaleTimeString("id-ID")}
+                <p className="text-4xl font-mono font-bold text-blue-300 mt-1" suppressHydrationWarning>
+                    {mounted ? jamSekarang.toLocaleTimeString("id-ID") : "--:--:--"}
                 </p>
             </div>
 
@@ -186,9 +197,10 @@ export default function AbsenPage() {
 
                         {/* Overlay AI loading */}
                         {!modelsLoaded && (
-                            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/75 text-white gap-2 z-10">
+                            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/75 text-white gap-3 z-10">
                                 <Scan className="animate-spin w-8 h-8 text-blue-400" />
-                                <span className="text-sm font-medium animate-pulse">Menghubungkan Database AI...</span>
+                                <span className="text-sm font-medium animate-pulse">{loadingText}</span>
+                                <span className="text-xs text-slate-400">Mengunduh model AI dari server...</span>
                             </div>
                         )}
 

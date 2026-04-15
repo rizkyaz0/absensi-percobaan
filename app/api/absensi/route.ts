@@ -83,8 +83,8 @@ export async function POST(request: Request) {
 
                 if (minDistanceLokal < jarakTerbaik) {
                     jarakTerbaik = minDistanceLokal;
-                    // Skor threshold Euclidean FaceNet mutlak <= 0.45
-                    if (minDistanceLokal <= 0.45) {
+                    // Threshold 0.6: toleran dengan kacamata, sudut wajah, dan ekspresi berbeda
+                    if (minDistanceLokal <= 0.6) {
                         siswaCocok = { id: siswaDb.id, nama: siswaDb.nama, nis: siswaDb.nis };
                     }
                 }
@@ -94,7 +94,7 @@ export async function POST(request: Request) {
         if (!siswaCocok) {
             return NextResponse.json({
                 success: false,
-                message: `Identitas tak direkognisi. Jarak wajah terdekat (Euclidean): ${jarakTerbaik.toFixed(3)} (>0.45).`,
+                message: `Wajah tidak dikenali. Jarak terdekat: ${jarakTerbaik.toFixed(3)}`,
                 skor: jarakTerbaik // Menggunakan jarak untuk display
             }, { status: 404 });
         }

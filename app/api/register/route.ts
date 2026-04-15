@@ -58,8 +58,8 @@ export async function POST(request: Request) {
                     }
                 }
 
-                // Threshold FaceNet yang baku adalah <= 0.45 untuk orang yang sama
-                if (minDistance <= 0.45) {
+                // Threshold 0.6: toleran dengan kacamata, ekspresi, dan sudut berbeda
+                if (minDistance <= 0.6) {
                     return NextResponse.json(
                         { 
                             success: false, 

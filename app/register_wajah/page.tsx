@@ -15,6 +15,7 @@ type RegStep = "depan" | "kiri" | "kanan" | "submitting" | "success";
 export default function RegisterWajah() {
     const webcamRef = useRef<Webcam>(null);
     const [modelsLoaded, setModelsLoaded] = useState(false);
+    const [loadingText, setLoadingText] = useState("Mempersiapkan...");
     const [nama, setNama] = useState("");
     const [nis, setNis] = useState("");
     
@@ -27,16 +28,22 @@ export default function RegisterWajah() {
             try {
                 // Import dinamis di sisi klien
                 if (!faceapi) {
+                    setLoadingText("Memuat AI Engine...");
                     faceapi = await import("@vladmandic/face-api");
                 }
 
-                // CDN Resmi dari fork terupdate vladmandic
                 const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
-                await Promise.all([
-                    faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
-                    faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-                    faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
-                ]);
+                
+                // TinyFaceDetector: 30x lebih cepat dari SSD, dirancang untuk mobile
+                setLoadingText("Memuat Detektor Wajah...");
+                await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+                
+                setLoadingText("Memuat Landmark Model...");
+                await faceapi.nets.faceLandmark68TinyNet.loadFromUri(MODEL_URL);
+                
+                setLoadingText("Memuat Model Biometrik...");
+                await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+                
                 setModelsLoaded(true);
             } catch (error) {
                 console.error("Gagal memuat model:", error);
@@ -57,10 +64,10 @@ export default function RegisterWajah() {
         if (videoEl.readyState !== 4) return;
 
         try {
-            // Ekstrak 128D Vektor Identitas Langsung dari Video Frame
+            // TinyFaceDetector: jauh lebih cepat & optimal untuk mobile
             const result = await faceapi
-                .detectSingleFace(videoEl, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
-                .withFaceLandmarks()
+                .detectSingleFace(videoEl, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.4 }))
+                .withFaceLandmarks(true) // true = gunakan 68-point tiny model
                 .withFaceDescriptor();
 
             if (result) {
@@ -183,9 +190,10 @@ export default function RegisterWajah() {
                         />
                         
                         {!modelsLoaded && (
-                            <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/90 text-white gap-2 z-10">
+                            <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/90 text-white gap-3 z-10">
                                 <Scan className="animate-spin w-8 h-8 text-blue-400" />
-                                <span className="text-sm font-medium animate-pulse">Memuat Neural Network (2MB)...</span>
+                                <span className="text-sm font-medium animate-pulse text-center px-4">{loadingText}</span>
+                                <span className="text-xs text-slate-400">Mengunduh dari server, harap tunggu...</span>
                             </div>
                         )}
 
