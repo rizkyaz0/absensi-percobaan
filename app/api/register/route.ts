@@ -58,8 +58,8 @@ export async function POST(request: Request) {
                     }
                 }
 
-                // Threshold 0.6: toleran dengan kacamata, ekspresi, dan sudut berbeda
-                if (minDistance <= 0.6) {
+                // Threshold 0.40: ketat, mencegah false positive saat pendaftaran
+                if (minDistance <= 0.40) {
                     return NextResponse.json(
                         { 
                             success: false, 

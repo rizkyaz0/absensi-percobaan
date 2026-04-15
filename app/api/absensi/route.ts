@@ -83,8 +83,8 @@ export async function POST(request: Request) {
 
                 if (minDistanceLokal < jarakTerbaik) {
                     jarakTerbaik = minDistanceLokal;
-                    // Threshold 0.6: toleran dengan kacamata, sudut wajah, dan ekspresi berbeda
-                    if (minDistanceLokal <= 0.6) {
+                    // Threshold 0.40: ketat, akurasi tinggi, sesuai standar FaceNet
+                    if (minDistanceLokal <= 0.40) {
                         siswaCocok = { id: siswaDb.id, nama: siswaDb.nama, nis: siswaDb.nis };
                     }
                 }
@@ -94,7 +94,7 @@ export async function POST(request: Request) {
         if (!siswaCocok) {
             return NextResponse.json({
                 success: false,
-                message: `Wajah tidak dikenali. Jarak terdekat: ${jarakTerbaik.toFixed(3)}`,
+                message: `Wajah tidak dikenali. Jarak biometrik terdekat: ${jarakTerbaik.toFixed(3)} (batas: ≤0.40).`,
                 skor: jarakTerbaik // Menggunakan jarak untuk display
             }, { status: 404 });
         }
