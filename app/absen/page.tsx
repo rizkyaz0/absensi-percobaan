@@ -24,21 +24,19 @@ interface AbsenResult {
 const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
 
 // ============================================================
-// HELPER: Downscale video ke canvas kecil sebelum deteksi.
-// Kamera HP (720p-1080p) terlalu besar untuk CPU mobile → tidak ada hasil.
-// Canvas 320×240 mengurangi beban ±10x tanpa kehilangan akurasi.
+// HELPER: Ambil frame dari webcam sebagai HTMLImageElement
+// getScreenshot() lebih andal di mobile daripada membaca <video> langsung
+// karena videoWidth sering = 0 di mobile browser saat halaman baru dibuka.
 // ============================================================
-function getScaledCanvas(videoEl: HTMLVideoElement, maxW = 320, maxH = 240): HTMLCanvasElement {
-    const ar = videoEl.videoWidth / videoEl.videoHeight;
-    let w = maxW;
-    let h = Math.round(maxW / ar);
-    if (h > maxH) { h = maxH; w = Math.round(maxH * ar); }
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    if (ctx) ctx.drawImage(videoEl, 0, 0, w, h);
-    return canvas;
+async function getFrameAsImage(webcam: any, targetWidth = 320): Promise<HTMLImageElement | null> {
+    const shot = webcam.getScreenshot({ width: targetWidth, height: Math.round(targetWidth * 0.75) });
+    if (!shot) return null;
+    return new Promise((resolve) => {
+        const img = new window.Image();
+        img.onload  = () => resolve(img);
+        img.onerror = () => resolve(null);
+        img.src = shot;
+    });
 }
 
 export default function AbsenPage() {
@@ -115,25 +113,31 @@ export default function AbsenPage() {
         setAbsenStatus("scanning");
         setHasilAbsen(null);
 
-        const videoEl = webcamRef.current.video;
-        if (videoEl.readyState !== 4) {
-            toast.error("Kamera belum siap");
+        // Pastikan webcam ref tersedia
+        if (!webcamRef.current) {
+            toast.error("Kamera tidak ditemukan.");
             setAbsenStatus("idle");
             return;
         }
 
         try {
-            // Downscale ke 320×240 agar HP bisa memproses
-            const canvas = getScaledCanvas(videoEl);
+            // getScreenshot() lebih andal di mobile daripada membaca <video> langsung
+            const frameImg = await getFrameAsImage(webcamRef.current!, 320);
+            if (!frameImg) {
+                toast.error("Kamera error", { description: "Gagal mengambil frame. Coba refresh halaman." });
+                setAbsenStatus("error");
+                setTimeout(() => setAbsenStatus("idle"), 2000);
+                return;
+            }
 
             const result = await faceapi
-                .detectSingleFace(canvas, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.4 }))
+                .detectSingleFace(frameImg, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.4 }))
                 .withFaceLandmarks()
                 .withFaceDescriptor();
 
             if (!result) {
                 toast.error("Wajah tidak terdeteksi", {
-                    description: "Pastikan menghadap layar dengan jelas dan pencahayaan cukup."
+                    description: "Pastikan menghadap kamera, pencahayaan cukup, dan wajah tidak tertutup."
                 });
                 setAbsenStatus("error");
                 setTimeout(() => setAbsenStatus("idle"), 2000);
@@ -142,9 +146,8 @@ export default function AbsenPage() {
 
             const faceDescriptorArray = Array.from(result.descriptor) as number[];
 
-            // Validasi ukuran wajah (berdasarkan dimensi canvas yang sudah di-scale)
-            const box = result.detection.box;
-            if (box.width / canvas.width < 0.18) {
+            // Validasi ukuran wajah (berdasarkan dimensi frame 320px)
+            if (result.detection.box.width / frameImg.width < 0.15) {
                 toast.error("Wajah terlalu jauh", { description: "Dekatkan wajah lebih ke kamera." });
                 setAbsenStatus("error");
                 setTimeout(() => setAbsenStatus("idle"), 2000);

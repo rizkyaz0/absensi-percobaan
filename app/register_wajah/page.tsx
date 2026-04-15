@@ -19,25 +19,19 @@ type RegStep = "netral" | "kacamata" | "senyum" | "submitting" | "success";
 const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
 
 // ============================================================
-// HELPER: Downscale video ke canvas 320×240 sebelum deteksi.
-// Penyebab utama wajah tidak terdeteksi di HP: resolusi kamera
-// HP (720p-1080p) terlalu besar untuk diproses CPU mobile.
-// Canvas kecil 320×240 mengurangi beban ±10x tanpa kehilangan akurasi.
+// HELPER: Ambil frame dari webcam sebagai HTMLImageElement
+// Menggunakan getScreenshot() jauh lebih andal di mobile daripada
+// membaca <video> langsung (videoWidth sering = 0 di mobile browser).
 // ============================================================
-function getScaledCanvas(videoEl: HTMLVideoElement, maxW = 320, maxH = 240): HTMLCanvasElement {
-    const aspectRatio = videoEl.videoWidth / videoEl.videoHeight;
-    let targetW = maxW;
-    let targetH = Math.round(maxW / aspectRatio);
-    if (targetH > maxH) {
-        targetH = maxH;
-        targetW = Math.round(maxH * aspectRatio);
-    }
-    const canvas = document.createElement("canvas");
-    canvas.width  = targetW;
-    canvas.height = targetH;
-    const ctx = canvas.getContext("2d");
-    if (ctx) ctx.drawImage(videoEl, 0, 0, targetW, targetH);
-    return canvas;
+async function getFrameAsImage(webcam: any, targetWidth = 320): Promise<HTMLImageElement | null> {
+    const shot = webcam.getScreenshot({ width: targetWidth, height: Math.round(targetWidth * 0.75) });
+    if (!shot) return null;
+    return new Promise((resolve) => {
+        const img = new window.Image();
+        img.onload  = () => resolve(img);
+        img.onerror = () => resolve(null);
+        img.src = shot;
+    });
 }
 
 // ============================================================
@@ -106,7 +100,7 @@ export default function RegisterWajah() {
         }
 
         const videoEl = webcamRef.current?.video;
-        if (!videoEl || videoEl.readyState !== 4) {
+        if (!videoEl) {
             toast.error("Kamera belum siap. Pastikan kamera diizinkan.");
             return;
         }
@@ -114,26 +108,31 @@ export default function RegisterWajah() {
         setIsProcessing(true);
 
         try {
-            // Downscale ke 320×240 agar HP bisa memproses dengan cepat
-            const canvas = getScaledCanvas(videoEl);
+            // getScreenshot() lebih andal di mobile daripada membaca <video> langsung
+            const frameImg = await getFrameAsImage(webcamRef.current!, 320);
+            if (!frameImg) {
+                toast.error("Gagal mengambil gambar dari kamera.", {
+                    description: "Coba refresh halaman dan izinkan akses kamera."
+                });
+                return;
+            }
 
-            // Deteksi pada canvas kecil — jauh lebih ringan di CPU mobile
             const result = await faceapi
-                .detectSingleFace(canvas, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.4 }))
+                .detectSingleFace(frameImg, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.4 }))
                 .withFaceLandmarks()
                 .withFaceDescriptor();
 
             if (!result) {
                 toast.error("Wajah tidak terdeteksi!", {
-                    description: "Pastikan wajah Anda terlihat jelas, pencahayaan cukup, dan tidak ada halangan.",
+                    description: "Pastikan: wajah jelas, pencahayaan cukup, kamera tidak tertutup.",
                 });
                 return;
             }
 
-            // Validasi ukuran wajah — jangan terlalu jauh dari kamera
-            if (result.detection.box.width / videoEl.videoWidth < 0.18) {
+            // Validasi ukuran wajah minimum
+            if (result.detection.box.width / frameImg.width < 0.15) {
                 toast.error("Wajah terlalu jauh dari kamera.", {
-                    description: "Dekatkan wajah Anda hingga memenuhi area dalam bingkai.",
+                    description: "Dekatkan wajah hingga memenuhi area bingkai oval."
                 });
                 return;
             }
