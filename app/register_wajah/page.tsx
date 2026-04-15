@@ -2,38 +2,20 @@
 import React, { useRef, useState, useEffect, useCallback } from "react";
 import Webcam from "react-webcam";
 
-// Dynamic import untuk menghindari SSR Build Error (TextEncoder)
+// Dynamic import untuk menghindari SSR Build Error (TextEncoder di Node.js)
 let faceapi: any = null;
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
-import { Scan, CheckCircle2, Eye, Glasses, Smile, UserPlus } from "lucide-react";
+import { Scan, CheckCircle2, Eye, Glasses, Smile, UserPlus, Camera } from "lucide-react";
 
 // ============================================================
 // TIPE DATA
 // ============================================================
 type RegStep = "netral" | "kacamata" | "senyum" | "submitting" | "success";
 
-// ============================================================
-// HELPER: Eye Aspect Ratio (EAR) — Anti-Spoofing Liveness
-// Rumus: EAR = (||p2-p6|| + ||p3-p5||) / (2 * ||p1-p4||)
-// Indeks landmark face-api.js: mata kanan 36-41, mata kiri 42-47
-// ============================================================
-function euclidDist(p1: { x: number; y: number }, p2: { x: number; y: number }): number {
-    return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
-}
-
-function computeEAR(eyePts: { x: number; y: number }[]): number {
-    // eyePts harus berisi 6 titik (indeks 0-5 dari range mata)
-    const A = euclidDist(eyePts[1], eyePts[5]);
-    const B = euclidDist(eyePts[2], eyePts[4]);
-    const C = euclidDist(eyePts[0], eyePts[3]);
-    return (A + B) / (2.0 * C);
-}
-
-const EAR_BLINK_THRESHOLD = 0.18; // Di bawah nilai ini = mata tertutup (kedip)
 const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
 
 // ============================================================
@@ -41,28 +23,22 @@ const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
 // ============================================================
 export default function RegisterWajah() {
     const webcamRef = useRef<Webcam>(null);
-    const animFrameRef = useRef<number>(0);
 
     const [modelsLoaded, setModelsLoaded] = useState(false);
     const [loadingText, setLoadingText] = useState("Mempersiapkan...");
     const [nama, setNama] = useState("");
     const [nis, setNis] = useState("");
-
-    // State alur registrasi multivariasi
     const [step, setStep] = useState<RegStep>("netral");
     const [embeddings, setEmbeddings] = useState<number[][]>([]);
-
-    // State Liveness EAR
-    const [livnessReady, setLivenessReady] = useState(false);  // apakah kedipan sudah terdeteksi
-    const [earStatus, setEarStatus] = useState<"menunggu" | "kedip" | "ok">("menunggu");
-    const earWasLow = useRef(false); // penanda EAR sudah pernah turun (kedip)
-    const isCapturing = useRef(false);
+    const [isProcessing, setIsProcessing] = useState(false); // Mencegah double-click
 
     // ============================================================
-    // MUAT MODEL SSD MOBILENET V1 (Akurasi Tertinggi)
+    // MUAT MODEL — SsdMobilenetv1 + Landmark68 + Recognition
+    // Model di-cache browser setelah pertama kali diunduh.
     // ============================================================
     useEffect(() => {
         let cancelled = false;
+
         async function loadModels() {
             try {
                 if (!faceapi) {
@@ -71,215 +47,202 @@ export default function RegisterWajah() {
                 }
                 if (cancelled) return;
 
-                // SsdMobilenetv1: akurasi bounding box tertinggi untuk deskripsi 128D
-                setLoadingText("Memuat Detektor SSD...");
+                setLoadingText("Memuat Detektor SSD (1/3)...");
                 await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
                 if (cancelled) return;
 
-                setLoadingText("Memuat Landmark 68 Titik...");
+                setLoadingText("Memuat Landmark 68-Titik (2/3)...");
                 await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
                 if (cancelled) return;
 
-                setLoadingText("Memuat Model Biometrik...");
+                setLoadingText("Memuat Model Biometrik (3/3)...");
                 await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
                 if (cancelled) return;
 
                 setModelsLoaded(true);
-            } catch (error) {
+            } catch (err) {
                 if (!cancelled) {
-                    console.error("Gagal memuat model:", error);
-                    toast.error("Gagal terhubung ke server model AI");
+                    console.error(err);
+                    toast.error("Gagal memuat model AI. Periksa koneksi internet.");
                 }
             }
         }
+
         loadModels();
         return () => { cancelled = true; };
     }, []);
 
     // ============================================================
-    // LOOP DETEKSI EAR — Throttled 200ms (bukan per-frame)
-    // Hanya gunakan .withFaceLandmarks() tanpa descriptor → 3x lebih ringan
-    // ============================================================
-    const startLivenessLoop = useCallback(() => {
-        earWasLow.current = false;
-        setEarStatus("menunggu");
-        setLivenessReady(false);
-        isCapturing.current = false;
-
-        // Gunakan setInterval 200ms agar tidak membebani CPU seperti requestAnimationFrame 60fps
-        const intervalId = setInterval(async () => {
-            if (!faceapi || !webcamRef.current?.video) return;
-            const videoEl = webcamRef.current.video;
-            if (videoEl.readyState !== 4) return;
-
-            try {
-                // Pipeline RINGAN: SSD detect + landmark saja (TANPA descriptor mahal)
-                const result = await faceapi
-                    .detectSingleFace(videoEl, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
-                    .withFaceLandmarks();
-
-                if (result) {
-                    const pts = result.landmarks.positions;
-
-                    // Mata kanan: indeks 36-41, Mata kiri: indeks 42-47
-                    const rightEye = pts.slice(36, 42);
-                    const leftEye  = pts.slice(42, 48);
-                    const ear = (computeEAR(rightEye) + computeEAR(leftEye)) / 2;
-
-                    if (ear < EAR_BLINK_THRESHOLD) {
-                        earWasLow.current = true;
-                        setEarStatus("kedip");
-                    } else if (earWasLow.current) {
-                        // Mata sudah terbuka kembali setelah kedip → LIVENESS CONFIRMED
-                        setEarStatus("ok");
-                        setLivenessReady(true);
-                        clearInterval(intervalId);
-                        animFrameRef.current = 0;
-                    }
-                }
-            } catch (_) {
-                // Abaikan error deteksi per frame
-            }
-        }, 200); // Hanya 5x per detik, jauh lebih hemat CPU
-
-        // Simpan ID interval di ref agar bisa di-clear saat step berganti
-        animFrameRef.current = intervalId as unknown as number;
-    }, []);
-
-
-    // Mulai loop saat model siap
-    useEffect(() => {
-        if (modelsLoaded && (step === "netral" || step === "kacamata" || step === "senyum")) {
-            startLivenessLoop();
-        }
-        return () => {
-            if (animFrameRef.current) clearInterval(animFrameRef.current);
-        };
-    }, [modelsLoaded, step, startLivenessLoop]);
-
-    // ============================================================
-    // AMBIL FRAME SETELAH LIVENESS TERVERIFIKASI
+    // CAPTURE — Deteksi hanya saat tombol diklik (tidak ada loop)
+    // Tidak ada EAR / requestAnimationFrame sehingga nol lag.
     // ============================================================
     const captureFrame = useCallback(async () => {
-        if (!modelsLoaded || !faceapi || !livnessReady || isCapturing.current) return;
-        if (!nama || !nis) {
-            toast.warning("Nama dan NIS wajib diisi di awal");
+        if (!modelsLoaded || !faceapi || isProcessing) return;
+        if (!nama.trim() || !nis.trim()) {
+            toast.warning("Nama dan NIS wajib diisi terlebih dahulu.");
             return;
         }
 
         const videoEl = webcamRef.current?.video;
-        if (!videoEl || videoEl.readyState !== 4) return;
+        if (!videoEl || videoEl.readyState !== 4) {
+            toast.error("Kamera belum siap. Pastikan kamera diizinkan.");
+            return;
+        }
 
-        isCapturing.current = true;
+        setIsProcessing(true);
 
         try {
-            // Deteksi dengan SsdMobilenetv1 + landmark 68 titik standar + descriptor 128D
+            // Satu kali deteksi penuh — tidak ada loop, tidak ada lag
             const result = await faceapi
                 .detectSingleFace(videoEl, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
                 .withFaceLandmarks()
                 .withFaceDescriptor();
 
             if (!result) {
-                toast.error("Wajah tidak terdeteksi. Pastikan wajah terlihat jelas dan pencahayaan cukup.");
-                isCapturing.current = false;
+                toast.error("Wajah tidak terdeteksi!", {
+                    description: "Pastikan wajah Anda terlihat jelas, pencahayaan cukup, dan tidak ada halangan.",
+                });
                 return;
             }
 
-            const faceDescriptor = Array.from(result.descriptor) as number[];
-            const newEmbeddings = [...embeddings, faceDescriptor];
+            // Validasi ukuran wajah — jangan terlalu jauh dari kamera
+            if (result.detection.box.width / videoEl.videoWidth < 0.18) {
+                toast.error("Wajah terlalu jauh dari kamera.", {
+                    description: "Dekatkan wajah Anda hingga memenuhi area dalam bingkai.",
+                });
+                return;
+            }
+
+            const descriptor = Array.from(result.descriptor) as number[];
+            const newEmbeddings = [...embeddings, descriptor];
             setEmbeddings(newEmbeddings);
 
             if (step === "netral") {
                 toast.success("✅ Wajah Netral Terekam!");
                 setStep("kacamata");
             } else if (step === "kacamata") {
-                toast.success("✅ Wajah Variasi Terekam!");
+                toast.success("✅ Variasi Kedua Terekam!");
                 setStep("senyum");
             } else if (step === "senyum") {
-                toast.success("✅ Semua Variasi Lengkap! Menyimpan...");
+                toast.success("✅ Semua variasi selesai! Menyimpan ke database...");
                 setStep("submitting");
-                cancelAnimationFrame(animFrameRef.current);
                 await submitData(newEmbeddings);
             }
-        } catch (e: any) {
-            toast.error(`Error saat capture: ${e.message}`);
+        } catch (err: any) {
+            toast.error("Terjadi error saat deteksi.", { description: err.message });
         } finally {
-            isCapturing.current = false;
+            setIsProcessing(false);
         }
-    }, [modelsLoaded, livnessReady, nama, nis, step, embeddings]);
+    }, [modelsLoaded, isProcessing, nama, nis, step, embeddings]);
 
     // ============================================================
-    // KIRIM DATA KE API
+    // KIRIM KE API
     // ============================================================
     const submitData = async (finalEmbeddings: number[][]) => {
         try {
             const res = await fetch("/api/register", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ nama, nis, faceEmbeddings: finalEmbeddings }),
+                body: JSON.stringify({ nama: nama.trim(), nis: nis.trim(), faceEmbeddings: finalEmbeddings }),
             });
+
             const hasil = await res.json();
+
             if (hasil.success) {
-                toast.success("Registrasi Sukses!", {
-                    description: `3 variasi biometrik ${nama} berhasil disimpan ke Cloud.`,
+                toast.success("Registrasi Berhasil!", {
+                    description: `3 variasi wajah ${nama} berhasil tersimpan.`,
                 });
                 setStep("success");
                 setNama("");
                 setNis("");
                 setTimeout(() => { setStep("netral"); setEmbeddings([]); }, 3500);
             } else {
-                toast.error("Pendaftaran Ditolak", { description: hasil.message });
+                toast.error("Registrasi Ditolak", { description: hasil.message });
                 setStep("netral");
                 setEmbeddings([]);
             }
         } catch {
-            toast.error("Terjadi kesalahan jaringan/server.");
+            toast.error("Gagal terhubung ke server.");
             setStep("netral");
             setEmbeddings([]);
         }
     };
 
     // ============================================================
-    // KONFIGURASI UI PER LANGKAH
+    // KONFIGURASI UI
     // ============================================================
-    const stepConfig: Record<RegStep, { label: string; subLabel: string; icon: React.ReactNode; color: string; step: number }> = {
-        netral:     { label: "Kedipkan Mata, lalu Tekan Tombol",   subLabel: "Wajah Netral (Tanpa Aksesori)", icon: <Eye className="w-5 h-5" />,      color: "bg-blue-600 hover:bg-blue-700", step: 1 },
-        kacamata:   { label: "Kedipkan Mata, lalu Tekan Tombol",   subLabel: "Dengan Kacamata / Kondisi Berbeda", icon: <Glasses className="w-5 h-5" />, color: "bg-purple-600 hover:bg-purple-700", step: 2 },
-        senyum:     { label: "Kedipkan Mata, lalu Tekan Tombol",   subLabel: "Wajah Tersenyum Natural", icon: <Smile className="w-5 h-5" />,     color: "bg-amber-500 hover:bg-amber-600 text-slate-900", step: 3 },
-        submitting: { label: "Menyimpan ke Database...",           subLabel: "", icon: <Scan className="w-5 h-5 animate-spin" />,  color: "bg-cyan-700 cursor-not-allowed opacity-80", step: 3 },
-        success:    { label: "Registrasi Berhasil!",               subLabel: "", icon: <CheckCircle2 className="w-5 h-5" />,       color: "bg-green-600 cursor-not-allowed", step: 3 },
+    const stepConfig: Record<RegStep, {
+        label: string; subLabel: string; desc: string;
+        icon: React.ReactNode; color: string; stepNum: number;
+    }> = {
+        netral: {
+            label: "Ambil Foto Sekarang",
+            subLabel: "Langkah 1: Wajah Netral",
+            desc: "Hadapkan wajah lurus ke kamera, ekspresi normal.",
+            icon: <Eye className="w-5 h-5" />,
+            color: "bg-blue-600 hover:bg-blue-700",
+            stepNum: 1,
+        },
+        kacamata: {
+            label: "Ambil Foto Sekarang",
+            subLabel: "Langkah 2: Dengan Kacamata / Aksesori",
+            desc: "Gunakan kacamata atau kondisi berbeda dari langkah 1.",
+            icon: <Glasses className="w-5 h-5" />,
+            color: "bg-purple-600 hover:bg-purple-700",
+            stepNum: 2,
+        },
+        senyum: {
+            label: "Ambil Foto Sekarang",
+            subLabel: "Langkah 3: Ekspresi Senyum",
+            desc: "Tersenyumlah natural ke arah kamera.",
+            icon: <Smile className="w-5 h-5" />,
+            color: "bg-amber-500 hover:bg-amber-600 text-slate-900",
+            stepNum: 3,
+        },
+        submitting: {
+            label: "Menyimpan ke Database...",
+            subLabel: "", desc: "",
+            icon: <Scan className="w-5 h-5 animate-spin" />,
+            color: "bg-cyan-700 cursor-not-allowed opacity-80",
+            stepNum: 3,
+        },
+        success: {
+            label: "Registrasi Berhasil!",
+            subLabel: "", desc: "",
+            icon: <CheckCircle2 className="w-5 h-5" />,
+            color: "bg-green-600 cursor-not-allowed",
+            stepNum: 3,
+        },
     };
+
     const ui = stepConfig[step];
+    const isActive = step !== "submitting" && step !== "success";
+    const canCapture = modelsLoaded && isActive && !isProcessing;
 
-    const earBadgeColor =
-        earStatus === "ok"   ? "bg-green-500 text-white" :
-        earStatus === "kedip"? "bg-yellow-400 text-black" :
-        "bg-slate-600 text-slate-300";
-
-    const earBadgeLabel =
-        earStatus === "ok"   ? "✅ Hidup Terverifikasi" :
-        earStatus === "kedip"? "👁 Kedipan Terdeteksi..." :
-        "👁 Menunggu Kedipan Mata...";
-
-    const canCapture = modelsLoaded && livnessReady && step !== "submitting" && step !== "success";
+    const stepKeys: RegStep[] = ["netral", "kacamata", "senyum"];
 
     return (
         <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 flex flex-col items-center justify-center p-4 gap-4">
+            {/* Judul */}
             <div className="text-center">
                 <h1 className="text-3xl font-bold text-white tracking-tight flex items-center gap-2 justify-center">
-                    <UserPlus className="w-7 h-7 text-blue-400" /> Daftar Wajah Biometrik
+                    <UserPlus className="w-7 h-7 text-blue-400" />
+                    Daftar Wajah Biometrik
                 </h1>
-                <p className="text-slate-400 text-sm mt-1">Anti-Spoofing Aktif — Kedipan Mata Diperlukan</p>
+                <p className="text-slate-400 text-sm mt-1">
+                    Daftarkan 3 variasi wajah untuk akurasi optimal
+                </p>
             </div>
 
             <Card className="w-full max-w-lg md:max-w-2xl bg-slate-800/60 border-slate-700 backdrop-blur-sm shadow-2xl rounded-3xl">
                 <CardContent className="p-4 md:p-6 space-y-4 pt-6">
+
                     {/* Form Input */}
                     <div className="grid grid-cols-2 gap-3">
                         <div className="space-y-1">
                             <label className="text-xs font-medium text-slate-300 ml-1">Nama Lengkap</label>
                             <Input
-                                disabled={step !== "netral"}
+                                disabled={!isActive}
                                 placeholder="Masukkan nama..."
                                 value={nama}
                                 onChange={(e) => setNama(e.target.value)}
@@ -289,7 +252,7 @@ export default function RegisterWajah() {
                         <div className="space-y-1">
                             <label className="text-xs font-medium text-slate-300 ml-1">NIS</label>
                             <Input
-                                disabled={step !== "netral"}
+                                disabled={!isActive}
                                 placeholder="Masukkan NIS..."
                                 value={nis}
                                 onChange={(e) => setNis(e.target.value)}
@@ -298,26 +261,41 @@ export default function RegisterWajah() {
                         </div>
                     </div>
 
-                    {/* Step Progress */}
+                    {/* Step Progress Bar */}
                     <div className="flex items-center gap-2 px-1">
-                        {(["netral", "kacamata", "senyum"] as RegStep[]).map((s, i) => {
+                        {stepKeys.map((s, i) => {
                             const done = embeddings.length > i;
                             const active = step === s;
                             return (
                                 <React.Fragment key={s}>
-                                    <div className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-semibold transition-all ${done ? "bg-green-500 text-white" : active ? "bg-blue-600 text-white ring-2 ring-blue-400" : "bg-slate-700 text-slate-400"}`}>
-                                        {done ? <CheckCircle2 className="w-3 h-3" /> : stepConfig[s].icon}
-                                        <span className="hidden sm:inline">{i + 1}. {stepConfig[s].subLabel.split(" ")[0]}</span>
+                                    <div className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-semibold transition-all duration-300 ${
+                                        done   ? "bg-green-500 text-white" :
+                                        active ? "bg-blue-600 text-white ring-2 ring-blue-400" :
+                                        "bg-slate-700 text-slate-400"
+                                    }`}>
+                                        {done
+                                            ? <CheckCircle2 className="w-3.5 h-3.5" />
+                                            : stepConfig[s].icon
+                                        }
+                                        <span className="hidden sm:inline">
+                                            {done ? "Selesai" : stepConfig[s].subLabel.split(":")[0]}
+                                        </span>
                                         <span className="sm:hidden">{i + 1}</span>
                                     </div>
-                                    {i < 2 && <div className={`flex-1 h-0.5 rounded ${done ? "bg-green-500" : "bg-slate-700"}`} />}
+                                    {i < 2 && (
+                                        <div className={`flex-1 h-0.5 rounded transition-all duration-300 ${done ? "bg-green-500" : "bg-slate-700"}`} />
+                                    )}
                                 </React.Fragment>
                             );
                         })}
                     </div>
 
                     {/* Viewport Kamera */}
-                    <div className="relative aspect-[4/3] md:aspect-video rounded-2xl overflow-hidden bg-black border-2 border-slate-600/50 shadow-inner">
+                    <div className={`relative aspect-[4/3] md:aspect-video rounded-2xl overflow-hidden bg-black shadow-inner border-2 transition-all duration-300 ${
+                        isProcessing ? "border-blue-400 shadow-[0_0_20px_rgba(59,130,246,0.4)]" :
+                        step === "success" ? "border-green-400" :
+                        "border-slate-600/50"
+                    }`}>
                         <Webcam
                             ref={webcamRef}
                             screenshotFormat="image/jpeg"
@@ -325,16 +303,24 @@ export default function RegisterWajah() {
                             videoConstraints={{ facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }}
                         />
 
-                        {/* Overlay loading model */}
+                        {/* Overlay: Loading Model */}
                         {!modelsLoaded && (
-                            <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/92 text-white gap-3 z-10">
+                            <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/93 text-white gap-3 z-10">
                                 <Scan className="animate-spin w-9 h-9 text-blue-400" />
                                 <span className="text-sm font-medium animate-pulse text-center px-4">{loadingText}</span>
-                                <span className="text-xs text-slate-400">Harap tunggu, mengunduh model AI...</span>
+                                <span className="text-xs text-slate-400">Model AI ~7MB — tersimpan cache setelah selesai</span>
                             </div>
                         )}
 
-                        {/* Overlay Sukses */}
+                        {/* Overlay: Processing */}
+                        {isProcessing && (
+                            <div className="absolute inset-0 flex flex-col items-center justify-center bg-blue-900/70 text-white gap-2 z-10">
+                                <Scan className="animate-spin w-9 h-9 text-blue-300" />
+                                <span className="text-sm font-semibold">Mengekstrak vektor biometrik...</span>
+                            </div>
+                        )}
+
+                        {/* Overlay: Sukses */}
                         {step === "success" && (
                             <div className="absolute inset-0 flex flex-col items-center justify-center bg-green-900/80 text-white gap-3 z-10">
                                 <CheckCircle2 className="w-16 h-16 text-green-400" />
@@ -342,38 +328,38 @@ export default function RegisterWajah() {
                             </div>
                         )}
 
-                        {/* Oval Bingkai */}
+                        {/* Bingkai Oval Panduan */}
                         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                            <div className={`w-[52%] h-[80%] border-2 border-dashed rounded-[120px] transition-colors duration-300 ${canCapture ? "border-green-400/70" : "border-white/30"}`} />
+                            <div className={`w-[50%] h-[80%] border-2 border-dashed rounded-[120px] transition-colors duration-300 ${
+                                isProcessing ? "border-blue-400" :
+                                canCapture   ? "border-white/50" :
+                                "border-white/20"
+                            }`} />
                         </div>
 
-                        {/* Instruksi langkah aktif */}
-                        {modelsLoaded && step !== "success" && step !== "submitting" && (
-                            <div className="absolute top-2 left-0 right-0 flex justify-center">
-                                <span className="bg-slate-900/80 text-white/90 text-xs px-3 py-1.5 rounded-full font-medium">
-                                    Langkah {ui.step}/3: {ui.subLabel}
-                                </span>
+                        {/* Label petunjuk langkah */}
+                        {modelsLoaded && isActive && !isProcessing && (
+                            <div className="absolute bottom-3 left-0 right-0 flex justify-center">
+                                <div className="bg-slate-900/85 text-white/90 text-xs px-3 py-2 rounded-xl font-medium text-center max-w-[90%]">
+                                    <div className="font-bold text-blue-300">{ui.subLabel}</div>
+                                    <div className="text-slate-400 mt-0.5">{ui.desc}</div>
+                                </div>
                             </div>
                         )}
                     </div>
 
-                    {/* Badge Status EAR Liveness */}
-                    {modelsLoaded && step !== "success" && step !== "submitting" && (
-                        <div className={`flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all ${earBadgeColor}`}>
-                            <span>{earBadgeLabel}</span>
-                        </div>
-                    )}
-
                     {/* Tombol Capture */}
                     <Button
-                        className={`w-full h-14 text-base font-semibold shadow-lg transition-all duration-300 ${ui.color} ${!canCapture ? "opacity-50 cursor-not-allowed" : ""}`}
+                        className={`w-full h-14 text-base font-semibold shadow-lg transition-all duration-200 ${ui.color} ${!canCapture ? "opacity-60 pointer-events-none" : "hover:scale-[1.01]"}`}
                         onClick={captureFrame}
                         disabled={!canCapture}
                     >
                         <span className="flex items-center gap-2">
-                            {ui.icon} {ui.label}
+                            {isProcessing ? <Scan className="animate-spin w-5 h-5" /> : ui.icon}
+                            {isProcessing ? "Memproses..." : ui.label}
                         </span>
                     </Button>
+
                 </CardContent>
             </Card>
 
