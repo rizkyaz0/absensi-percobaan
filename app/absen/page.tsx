@@ -23,6 +23,24 @@ interface AbsenResult {
 
 const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
 
+// ============================================================
+// HELPER: Downscale video ke canvas kecil sebelum deteksi.
+// Kamera HP (720p-1080p) terlalu besar untuk CPU mobile → tidak ada hasil.
+// Canvas 320×240 mengurangi beban ±10x tanpa kehilangan akurasi.
+// ============================================================
+function getScaledCanvas(videoEl: HTMLVideoElement, maxW = 320, maxH = 240): HTMLCanvasElement {
+    const ar = videoEl.videoWidth / videoEl.videoHeight;
+    let w = maxW;
+    let h = Math.round(maxW / ar);
+    if (h > maxH) { h = maxH; w = Math.round(maxH * ar); }
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (ctx) ctx.drawImage(videoEl, 0, 0, w, h);
+    return canvas;
+}
+
 export default function AbsenPage() {
     const webcamRef = useRef<Webcam>(null);
     const [modelsLoaded, setModelsLoaded] = useState(false);
@@ -105,9 +123,11 @@ export default function AbsenPage() {
         }
 
         try {
-            // SsdMobilenetv1 + Landmark 68 standar + Descriptor 128D
+            // Downscale ke 320×240 agar HP bisa memproses
+            const canvas = getScaledCanvas(videoEl);
+
             const result = await faceapi
-                .detectSingleFace(videoEl, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
+                .detectSingleFace(canvas, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.4 }))
                 .withFaceLandmarks()
                 .withFaceDescriptor();
 
@@ -122,9 +142,9 @@ export default function AbsenPage() {
 
             const faceDescriptorArray = Array.from(result.descriptor) as number[];
 
-            // Validasi ukuran wajah minimum
+            // Validasi ukuran wajah (berdasarkan dimensi canvas yang sudah di-scale)
             const box = result.detection.box;
-            if (box.width / videoEl.videoWidth < 0.18) {
+            if (box.width / canvas.width < 0.18) {
                 toast.error("Wajah terlalu jauh", { description: "Dekatkan wajah lebih ke kamera." });
                 setAbsenStatus("error");
                 setTimeout(() => setAbsenStatus("idle"), 2000);

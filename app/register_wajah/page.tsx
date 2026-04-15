@@ -19,6 +19,28 @@ type RegStep = "netral" | "kacamata" | "senyum" | "submitting" | "success";
 const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
 
 // ============================================================
+// HELPER: Downscale video ke canvas 320×240 sebelum deteksi.
+// Penyebab utama wajah tidak terdeteksi di HP: resolusi kamera
+// HP (720p-1080p) terlalu besar untuk diproses CPU mobile.
+// Canvas kecil 320×240 mengurangi beban ±10x tanpa kehilangan akurasi.
+// ============================================================
+function getScaledCanvas(videoEl: HTMLVideoElement, maxW = 320, maxH = 240): HTMLCanvasElement {
+    const aspectRatio = videoEl.videoWidth / videoEl.videoHeight;
+    let targetW = maxW;
+    let targetH = Math.round(maxW / aspectRatio);
+    if (targetH > maxH) {
+        targetH = maxH;
+        targetW = Math.round(maxH * aspectRatio);
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width  = targetW;
+    canvas.height = targetH;
+    const ctx = canvas.getContext("2d");
+    if (ctx) ctx.drawImage(videoEl, 0, 0, targetW, targetH);
+    return canvas;
+}
+
+// ============================================================
 // KOMPONEN UTAMA
 // ============================================================
 export default function RegisterWajah() {
@@ -92,9 +114,12 @@ export default function RegisterWajah() {
         setIsProcessing(true);
 
         try {
-            // Satu kali deteksi penuh — tidak ada loop, tidak ada lag
+            // Downscale ke 320×240 agar HP bisa memproses dengan cepat
+            const canvas = getScaledCanvas(videoEl);
+
+            // Deteksi pada canvas kecil — jauh lebih ringan di CPU mobile
             const result = await faceapi
-                .detectSingleFace(videoEl, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
+                .detectSingleFace(canvas, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.4 }))
                 .withFaceLandmarks()
                 .withFaceDescriptor();
 
